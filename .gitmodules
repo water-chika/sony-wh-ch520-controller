@@ -1,0 +1,3 @@
+[submodule "SonyHeadphonesClient"]
+	path = SonyHeadphonesClient
+	url = git@github.com:water-chika/SonyHeadphonesClient.git
