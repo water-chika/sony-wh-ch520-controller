@@ -25,10 +25,12 @@ add_library(whch520_core
     src/controller.cpp
     src/controls.cpp
     src/device.cpp
-    src/probe_adapter.cpp
 )
 add_library(whch520::core ALIAS whch520_core)
 target_include_directories(whch520_core PUBLIC include)
+target_include_directories(whch520_core SYSTEM PRIVATE
+    SonyHeadphonesClient/libmdr/src
+)
 target_link_libraries(whch520_core
     PUBLIC mdr mdr::bt
     PRIVATE PkgConfig::DBUS

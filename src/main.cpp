@@ -2,7 +2,6 @@
 #include "whch520/controller.hpp"
 #include "whch520/controls.hpp"
 #include "whch520/device.hpp"
-#include "whch520/probe.hpp"
 
 #include <array>
 #include <charconv>
@@ -109,9 +108,9 @@ int main(int argc, char **argv) {
     auto device = whch520::require_supported_device(mac);
     std::cout << whch520::format_bluez_status(
         device, whch520::read_bluez_status(device));
-    whch520::Controller controller(std::move(device), whch520::strict_probe());
+    whch520::Controller controller(std::move(device));
     controller.connect();
-    controller.probe();
+    controller.initialize();
     if (command == "read") {
       controller.print_protocol_status();
     } else if (command == "dsee") {

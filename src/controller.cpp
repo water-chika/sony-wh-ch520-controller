@@ -2,8 +2,8 @@
 
 #include "whch520/controls.hpp"
 #include "whch520/device.hpp"
-#include "whch520/probe.hpp"
 
+#include <Details.hpp>
 #include <mdr-bt/ConnectionLinux.h>
 #include <mdr-c/Base.h>
 #include <mdr-c/Connection.h>
@@ -13,7 +13,6 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
-#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -57,20 +56,32 @@ std::string get_text(MDRHeadphones *headphones, MDRText field,
 
 std::vector<std::uint8_t> get_function_ids(MDRHeadphones *headphones,
                                            std::uint32_t table) {
-  std::uint32_t count = 0;
-  MDRResult result =
-      mdrHeadphonesGetProbeFunctionIds(headphones, table, nullptr, &count);
-  if (result != MDR_RESULT_ERROR_BUFFER_TOO_SMALL && result != MDR_RESULT_OK) {
+  const auto *implementation = mdr::detail::HeadphonesImpl(headphones);
+  if (implementation->mProtocolFamily !=
+      mdr::MDRHeadphones::ProtocolFamily::V2) {
     return {};
   }
-  std::vector<std::uint8_t> ids(count);
-  if (count != 0 &&
-      mdrHeadphonesGetProbeFunctionIds(headphones, table, ids.data(), &count) !=
-          MDR_RESULT_OK) {
-    return {};
+  const auto &bitmap = table == 1
+                           ? implementation->mDetailsV2.mSupport.table1Functions
+                           : implementation->mDetailsV2.mSupport.table2Functions;
+  std::vector<std::uint8_t> ids;
+  for (std::size_t id = 0; id < bitmap.size(); ++id) {
+    if (bitmap[id]) {
+      ids.push_back(static_cast<std::uint8_t>(id));
+    }
   }
-  ids.resize(count);
   return ids;
+}
+
+void require_feature(MDRHeadphones *headphones, MDRFeature feature,
+                     const char *name) {
+  MDRFeatureAvailability availability = MDR_AVAILABILITY_UNKNOWN;
+  const MDRResult result =
+      mdrHeadphonesGetFeature(headphones, feature, &availability);
+  if (result != MDR_RESULT_OK || availability != MDR_AVAILABILITY_AVAILABLE) {
+    throw std::runtime_error(std::string("required feature is unavailable: ") +
+                             name);
+  }
 }
 
 std::vector<std::int32_t> get_bands(MDRHeadphones *headphones,
@@ -93,8 +104,8 @@ std::vector<std::int32_t> get_bands(MDRHeadphones *headphones,
 
 } // namespace
 
-Controller::Controller(Device device, StrictProbe &probe)
-    : device_(std::make_unique<Device>(std::move(device))), probe_(probe) {
+Controller::Controller(Device device)
+    : device_(std::make_unique<Device>(std::move(device))) {
   if (!is_supported_model(*device_)) {
     throw std::invalid_argument(
         "controller model guard requires exactly WH-CH520");
@@ -140,45 +151,24 @@ void Controller::connect(std::chrono::milliseconds timeout) {
               "RFCOMM v2 connect timed out");
   }
 
-  probe_.on_connected(device().address);
-  probe_connected_ = true;
   result = mdrHeadphonesCreate(MDR_ABI_VERSION, connection, MDR_PROTOCOL_V2,
                                &headphones_);
   if (result != MDR_RESULT_OK) {
     disconnect();
     throw_mdr(connection, result, "protocol v2 session creation failed");
   }
-  mdrHeadphonesSetPacketCallback(
-      headphones_,
-      [](void *user, MDRPacketDirection direction, const unsigned char *frame,
-         int frame_size) {
-        auto &probe = *static_cast<StrictProbe *>(user);
-        const auto bytes =
-            std::span(frame, static_cast<std::size_t>(frame_size));
-        if (direction == MDR_PACKET_DIRECTION_RX) {
-          probe.on_receive(bytes);
-        } else {
-          probe.on_send(bytes);
-        }
-      },
-      &probe_);
 }
 
-void Controller::probe(std::chrono::milliseconds timeout) {
+void Controller::initialize(std::chrono::milliseconds timeout) {
   if (headphones_ == nullptr) {
-    throw std::logic_error("connect before probe");
+    throw std::logic_error("connect before initialization");
   }
 
-  constexpr std::array phases{
-      MDR_PROBE_PHASE_IDENTITY,
-      MDR_PROBE_PHASE_SUPPORT_TABLES,
-      MDR_PROBE_PHASE_APPROVED_READS,
-  };
-  for (const MDRProbePhase phase : phases) {
-    MDRResult result = mdrHeadphonesRequestProbe(headphones_, phase);
+  const auto initialize = [&](MDRHeadphonesInitFlags flags) {
+    MDRResult result = mdrHeadphonesRequestInit(headphones_, flags);
     if (result != MDR_RESULT_OK) {
       throw_mdr(mdrConnectionLinuxGet(linux_connection_), result,
-                "protocol probe request failed");
+                "protocol initialization request failed");
     }
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -188,9 +178,9 @@ void Controller::probe(std::chrono::milliseconds timeout) {
       result = mdrHeadphonesPoll(headphones_, &event);
       if (result != MDR_RESULT_OK) {
         throw_mdr(mdrConnectionLinuxGet(linux_connection_), result,
-                  "protocol probe poll failed");
+                  "protocol initialization poll failed");
       }
-      if (event == MDR_EVENT_PROBE_PHASE_COMPLETE) {
+      if (event == MDR_EVENT_INITIALIZE_COMPLETE) {
         complete = true;
         break;
       }
@@ -198,57 +188,52 @@ void Controller::probe(std::chrono::milliseconds timeout) {
     }
     if (!complete) {
       throw_mdr(mdrConnectionLinuxGet(linux_connection_),
-                MDR_RESULT_ERROR_TIMEOUT, "protocol probe timed out");
+                MDR_RESULT_ERROR_TIMEOUT, "protocol initialization timed out");
     }
 
-    const auto response_deadline =
+    const auto evidence_deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < response_deadline) {
+    while (std::chrono::steady_clock::now() < evidence_deadline) {
       MDREvent event = MDR_EVENT_NONE;
       result = mdrHeadphonesPoll(headphones_, &event);
       if (result != MDR_RESULT_OK) {
         throw_mdr(mdrConnectionLinuxGet(linux_connection_), result,
-                  "protocol probe response poll failed");
+                  "protocol evidence response poll failed");
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+  };
 
-    if (phase == MDR_PROBE_PHASE_IDENTITY) {
-      std::string model_name = get_text(headphones_, MDR_TEXT_MODEL_NAME);
-      while (model_name.empty() &&
-             std::chrono::steady_clock::now() < deadline) {
-        MDREvent event = MDR_EVENT_NONE;
-        result = mdrHeadphonesPoll(headphones_, &event);
-        if (result != MDR_RESULT_OK) {
-          throw_mdr(mdrConnectionLinuxGet(linux_connection_), result,
-                    "protocol identity response poll failed");
-        }
-        model_name = get_text(headphones_, MDR_TEXT_MODEL_NAME);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      }
-      if (model_name != supported_model) {
-        throw std::runtime_error("protocol identity guard rejected model '" +
-                                 model_name + "' (expected exactly WH-CH520)");
-      }
-    }
+  initialize(MDR_HEADPHONES_INIT_IDENTITY);
+  const std::string model_name = get_text(headphones_, MDR_TEXT_MODEL_NAME);
+  if (model_name != supported_model) {
+    throw std::runtime_error("protocol identity guard rejected model '" +
+                             model_name + "' (expected exactly WH-CH520)");
   }
+
+  initialize(MDR_HEADPHONES_INIT_SUPPORT_FUNCTIONS);
+  require_feature(headphones_, MDR_FEATURE_EQUALIZER, "equalizer");
+  require_feature(headphones_, MDR_FEATURE_DSEE, "DSEE");
+  require_feature(headphones_, MDR_FEATURE_GENERAL_SETTINGS,
+                  "general settings");
+  require_feature(headphones_, MDR_FEATURE_PAIRED_DEVICE_MANAGEMENT,
+                  "paired-device management");
+
+  const auto table1 = get_function_ids(headphones_, 1);
+  const auto table2 = get_function_ids(headphones_, 2);
+  if (!matches_supported_tables(table1, table2)) {
+    throw std::runtime_error(
+        "protocol support-table bitmap does not exactly match WH-CH520");
+  }
+
+  initialize(MDR_HEADPHONES_INIT_EQUALIZER | MDR_HEADPHONES_INIT_DSEE |
+             MDR_HEADPHONES_INIT_GENERAL_SETTINGS |
+             MDR_HEADPHONES_INIT_PERIPHERALS);
 }
 
 void print_function_ids(MDRHeadphones *headphones, std::uint32_t table) {
-  std::uint32_t count = 0;
-  MDRResult result =
-      mdrHeadphonesGetProbeFunctionIds(headphones, table, nullptr, &count);
-  if (result != MDR_RESULT_ERROR_BUFFER_TOO_SMALL && result != MDR_RESULT_OK) {
-    return;
-  }
-  std::vector<std::uint8_t> ids(count);
-  if (count != 0 &&
-      mdrHeadphonesGetProbeFunctionIds(headphones, table, ids.data(), &count) !=
-          MDR_RESULT_OK) {
-    return;
-  }
   std::cout << "MDR table " << table << " functions:";
-  for (const std::uint8_t id : ids) {
+  for (const std::uint8_t id : get_function_ids(headphones, table)) {
     std::cout << " 0x" << std::hex << static_cast<unsigned int>(id);
   }
   std::cout << std::dec << '\n';
@@ -256,12 +241,11 @@ void print_function_ids(MDRHeadphones *headphones, std::uint32_t table) {
 
 void Controller::print_protocol_status() const {
   if (headphones_ == nullptr) {
-    throw std::logic_error("probe before reading protocol status");
+    throw std::logic_error("initialize before reading protocol status");
   }
-  MDRProbeState probe_state{};
-  if (mdrHeadphonesGetProbeState(headphones_, &probe_state) != MDR_RESULT_OK ||
-      probe_state.completed_phase != MDR_PROBE_PHASE_APPROVED_READS) {
-    throw std::logic_error("complete all probe phases before reading status");
+  if (mdrHeadphonesIsInitialized(headphones_) != MDR_TRUE ||
+      mdrHeadphonesIsReady(headphones_) != MDR_TRUE) {
+    throw std::logic_error("complete staged initialization before reading status");
   }
   const std::string model_name = get_text(headphones_, MDR_TEXT_MODEL_NAME);
   if (model_name != supported_model) {
@@ -270,12 +254,14 @@ void Controller::print_protocol_status() const {
   }
 
   std::cout << "Protocol model: " << model_name << '\n';
-  std::cout << "MDR protocol version: 0x" << std::hex
-            << probe_state.protocol_version << std::dec << '\n';
-  print_function_ids(headphones_, 1);
-  if (probe_state.has_table2 == MDR_TRUE) {
-    print_function_ids(headphones_, 2);
+  MDRModel identity{};
+  if (mdrHeadphonesGetModel(headphones_, &identity) != MDR_RESULT_OK) {
+    throw std::runtime_error("could not read protocol identity");
   }
+  std::cout << "MDR protocol version: 0x" << std::hex
+            << identity.protocol_version << std::dec << '\n';
+  print_function_ids(headphones_, 1);
+  print_function_ids(headphones_, 2);
   const std::string firmware = get_text(headphones_, MDR_TEXT_FIRMWARE_VERSION);
   if (!firmware.empty()) {
     std::cout << "Firmware: " << firmware << '\n';
@@ -364,7 +350,7 @@ void Controller::print_protocol_status() const {
 
 void Controller::require_supported_profile() const {
   if (headphones_ == nullptr) {
-    throw std::logic_error("connect and probe before profile validation");
+    throw std::logic_error("connect and initialize before profile validation");
   }
   MDREqualizer equalizer{};
   if (mdrHeadphonesGetEqualizer(headphones_, MDR_PROPERTY_CURRENT,
@@ -405,7 +391,7 @@ void Controller::require_supported_profile() const {
   if (!matches_supported_profile(evidence)) {
     std::ostringstream detail;
     detail << "refusing write: protocol evidence does not exactly match "
-              "WH-CH520 firmware 1.0.4 completed-probe profile"
+              "WH-CH520 firmware 1.0.4 completed-initialization profile"
            << " (model=" << evidence.model << ", firmware=" << evidence.firmware
            << ", table1=" << evidence.table1.size()
            << ", table2=" << evidence.table2.size()
@@ -441,10 +427,10 @@ void Controller::commit_and_wait(std::chrono::milliseconds timeout) {
             "commit apply timed out");
 }
 
-void Controller::reprobe() {
+void Controller::reinitialize() {
   disconnect();
   connect();
-  probe();
+  initialize();
   require_supported_profile();
 }
 
@@ -461,7 +447,7 @@ void Controller::set_dsee(bool enabled) {
     throw_mdr(nullptr, result, "DSEE stage failed");
   }
   commit_and_wait();
-  reprobe();
+  reinitialize();
   MDREqualizer after{};
   result = mdrHeadphonesGetEqualizer(headphones_, MDR_PROPERTY_CURRENT, &after);
   if (result != MDR_RESULT_OK ||
@@ -483,7 +469,7 @@ void Controller::set_equalizer_preset(std::uint32_t preset) {
     throw_mdr(nullptr, result, "EQ preset stage failed");
   }
   commit_and_wait();
-  reprobe();
+  reinitialize();
   MDREqualizer after{};
   result = mdrHeadphonesGetEqualizer(headphones_, MDR_PROPERTY_CURRENT, &after);
   if (result != MDR_RESULT_OK || after.preset != preset) {
@@ -507,7 +493,7 @@ void Controller::set_equalizer_clear_bass(std::int32_t clear_bass) {
     throw_mdr(nullptr, result, "clear bass stage failed");
   }
   commit_and_wait();
-  reprobe();
+  reinitialize();
   MDREqualizer after{};
   result = mdrHeadphonesGetEqualizer(headphones_, MDR_PROPERTY_CURRENT, &after);
   if (result != MDR_RESULT_OK || after.clear_bass != clear_bass) {
@@ -526,7 +512,7 @@ void Controller::set_equalizer_bands(const std::array<std::int32_t, 5> &bands) {
     throw_mdr(nullptr, result, "EQ bands stage failed");
   }
   commit_and_wait();
-  reprobe();
+  reinitialize();
   const auto after = get_bands(headphones_, MDR_PROPERTY_CURRENT);
   if (!std::ranges::equal(after, bands)) {
     throw std::runtime_error(
@@ -537,16 +523,11 @@ void Controller::set_equalizer_bands(const std::array<std::int32_t, 5> &bands) {
 
 void Controller::disconnect() noexcept {
   if (headphones_ != nullptr) {
-    mdrHeadphonesSetPacketCallback(headphones_, nullptr, nullptr);
     mdrHeadphonesDestroy(headphones_);
     headphones_ = nullptr;
   }
   if (linux_connection_ != nullptr) {
     mdrConnectionDisconnect(mdrConnectionLinuxGet(linux_connection_));
-  }
-  if (probe_connected_) {
-    probe_.on_disconnected();
-    probe_connected_ = false;
   }
 }
 

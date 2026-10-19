@@ -16,7 +16,7 @@ cmake --build /mnt/build/sony-wh-ch520-controller
 
 Dependencies: CMake 3.31+, a C++20 compiler, BlueZ development headers/libraries, D-Bus development files, and Git/network access for SonyHeadphonesClient's pinned `fmt` dependency when it is not already cached.
 
-The top-level project forcibly disables the upstream GUI client, tests, code generation, BLE, and shared libraries.
+The top-level project forcibly disables the upstream GUI client, tests, code generation, BLE, and shared libraries. It links the static `mdr` target and privately includes libmdr's internal `Details.hpp` solely to inspect the raw support-table bitmaps; that dependency is intentionally not exposed by `whch520_core`.
 
 ## Usage
 
@@ -30,13 +30,13 @@ The top-level project forcibly disables the upstream GUI client, tests, code gen
 /mnt/build/sony-wh-ch520-controller/whch520ctl eq-bands B1 B2 B3 B4 B5 [MAC]
 ```
 
-`status` is BlueZ-only. `read` validates the model, runs the three ordered GET-only probe phases, and reports the exact firmware/support tables, EQ/DSEE, `MULTIPOINT_SETTING`, paired devices, connected state, and current playback source.
+`status` is BlueZ-only. `read` validates the model and runs three staged `mdrHeadphonesRequestInit` calls: identity, support functions, then EQ/DSEE/general-settings/peripherals. The exact protocol model is guarded before support discovery; required features are checked through the public API and raw internal support-table bitmap membership is checked before any feature-state requests. It then reports firmware/support tables, EQ/DSEE, `MULTIPOINT_SETTING`, paired devices, connected state, and current playback source.
 
-Writes are enabled only when all completed-probe evidence exactly matches the tested WH-CH520 firmware 1.0.4 profile and advertised tables. Each command reads current state, stages one property, requests one commit, waits for apply completion, reconnects and repeats the strict GET-only probe, then reports success only after exact current-state readback. Multipoint is read-only because the physical headset acknowledged the generic write but retained its previous value. No ANC, raw command, pairing, playback, or source-switch actions are exposed.
+Writes are enabled only when all completed-initialization evidence exactly matches the tested WH-CH520 firmware 1.0.4 profile and the advertised tables have exact, order-independent membership. Each command reads current state, stages one property, requests one commit, waits for apply completion, reconnects and repeats the staged GET-only initialization, then reports success only after exact current-state readback. Multipoint is read-only because the physical headset acknowledged the generic write but retained its previous value. No ANC, raw command, pairing, playback, or source-switch actions are exposed.
 
-## Probe safety
+## Initialization safety
 
-The strict libmdr probe has a closed transmit allowlist. It excludes setting/action commands, notification enrollment (`0x94`, `0xC4`), noise-control queries, commit, pairing actions, shutdown, and playback actions. The protocol-reported model must be exactly `WH-CH520` before support-table or state probing proceeds.
+The controller requests only identity, support functions, EQ, DSEE, general settings, and peripherals. It does not request playback, noise control, assignable controls, alerts/notification enrollment, pairing actions, shutdown, or other optional groups. The protocol-reported model must be exactly `WH-CH520` before support-table or feature-state initialization proceeds.
 
 ## Ownership and license
 

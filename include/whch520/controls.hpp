@@ -25,6 +25,9 @@ struct EvidenceProfile {
   std::string_view general_setting_subject;
 };
 
+[[nodiscard]] bool
+matches_supported_tables(std::span<const std::uint8_t> table1,
+                         std::span<const std::uint8_t> table2) noexcept;
 [[nodiscard]] bool matches_supported_profile(const EvidenceProfile &profile) noexcept;
 [[nodiscard]] bool parse_on_off(std::string_view value);
 [[nodiscard]] std::uint32_t parse_equalizer_preset(std::string_view value);

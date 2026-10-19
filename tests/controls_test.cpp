@@ -24,12 +24,26 @@ int main() {
       .general_setting_subject = "MULTIPOINT_SETTING",
   };
   require(whch520::matches_supported_profile(exact));
+  require(whch520::matches_supported_tables(whch520::supported_table1,
+                                            whch520::supported_table2));
   auto wrong = exact;
   wrong.firmware = "1.0.5";
   require(!whch520::matches_supported_profile(wrong));
   wrong = exact;
   constexpr std::array<unsigned char, 3> reordered{0x30, 0x41, 0x31};
   wrong.table2 = reordered;
+  require(whch520::matches_supported_profile(wrong));
+  wrong = exact;
+  constexpr std::array<unsigned char, 3> duplicate{0x41, 0x30, 0x30};
+  wrong.table2 = duplicate;
+  require(!whch520::matches_supported_profile(wrong));
+  wrong = exact;
+  constexpr std::array<unsigned char, 4> extra{0x41, 0x30, 0x31, 0xff};
+  wrong.table2 = extra;
+  require(!whch520::matches_supported_profile(wrong));
+  wrong = exact;
+  constexpr std::array<unsigned char, 2> missing{0x41, 0x30};
+  wrong.table2 = missing;
   require(!whch520::matches_supported_profile(wrong));
   require(whch520::parse_on_off("on"));
   require(!whch520::parse_on_off("off"));

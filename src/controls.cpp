@@ -12,6 +12,23 @@ struct PresetName {
   std::uint32_t value;
 };
 
+template <std::size_t Size>
+bool has_exact_members(std::span<const std::uint8_t> actual,
+                       const std::array<std::uint8_t, Size> &expected) noexcept {
+  if (actual.size() != expected.size()) {
+    return false;
+  }
+  std::array<bool, 256> present{};
+  for (const std::uint8_t id : actual) {
+    if (present[id]) {
+      return false;
+    }
+    present[id] = true;
+  }
+  return std::ranges::all_of(expected,
+                             [&](std::uint8_t id) { return present[id]; });
+}
+
 constexpr std::array presets{
     PresetName{"off", 0},       PresetName{"rock", 1},
     PresetName{"pop", 2},       PresetName{"jazz", 3},
@@ -32,11 +49,16 @@ constexpr std::array presets{
 
 } // namespace
 
+bool matches_supported_tables(std::span<const std::uint8_t> table1,
+                              std::span<const std::uint8_t> table2) noexcept {
+  return has_exact_members(table1, supported_table1) &&
+         has_exact_members(table2, supported_table2);
+}
+
 bool matches_supported_profile(const EvidenceProfile &profile) noexcept {
   return profile.model == "WH-CH520" &&
          profile.firmware == supported_firmware &&
-         std::ranges::equal(profile.table1, supported_table1) &&
-         std::ranges::equal(profile.table2, supported_table2) &&
+         matches_supported_tables(profile.table1, profile.table2) &&
          profile.equalizer_available && profile.equalizer_bands == 5 &&
          profile.dsee_available && profile.boolean_general_settings == 1 &&
          profile.general_setting_subject == "MULTIPOINT_SETTING";

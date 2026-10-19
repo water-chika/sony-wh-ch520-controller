@@ -11,17 +11,15 @@ struct MDRHeadphones;
 namespace whch520 {
 
 struct Device;
-class StrictProbe;
-
 class Controller {
 public:
-  Controller(Device device, StrictProbe &probe);
+  explicit Controller(Device device);
   ~Controller();
   Controller(const Controller &) = delete;
   Controller &operator=(const Controller &) = delete;
 
   void connect(std::chrono::milliseconds timeout = std::chrono::seconds(15));
-  void probe(std::chrono::milliseconds timeout = std::chrono::seconds(15));
+  void initialize(std::chrono::milliseconds timeout = std::chrono::seconds(15));
   void print_protocol_status() const;
   void set_dsee(bool enabled);
   void set_equalizer_preset(std::uint32_t preset);
@@ -35,13 +33,11 @@ private:
   void require_supported_profile() const;
   void
   commit_and_wait(std::chrono::milliseconds timeout = std::chrono::seconds(15));
-  void reprobe();
+  void reinitialize();
 
   std::unique_ptr<Device> device_;
-  StrictProbe &probe_;
   MDRConnectionLinux *linux_connection_{};
   MDRHeadphones *headphones_{};
-  bool probe_connected_{};
 };
 
 } // namespace whch520
